@@ -1,71 +1,86 @@
-import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from typing import List, Dict, Any
+from datetime import datetime, timedelta
 
-app = FastAPI()
+from database import db, create_document, get_documents  # noqa: F401  (imported for readiness)
+import os
 
+app = FastAPI(title="KPI Dashboard API", version="1.0.0")
+
+# CORS
+frontend_url = os.getenv("FRONTEND_URL", "*")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[frontend_url, "*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-@app.get("/")
-def read_root():
-    return {"message": "Hello from FastAPI Backend!"}
 
-@app.get("/api/hello")
-def hello():
-    return {"message": "Hello from the backend API!"}
+@app.get("/")
+def root():
+    return {"message": "KPI Dashboard API is running", "status": "ok", "timestamp": datetime.utcnow()}
+
 
 @app.get("/test")
 def test_database():
-    """Test endpoint to check if database is available and accessible"""
-    response = {
-        "backend": "✅ Running",
-        "database": "❌ Not Available",
-        "database_url": None,
-        "database_name": None,
-        "connection_status": "Not Connected",
-        "collections": []
-    }
-    
     try:
-        # Try to import database module
-        from database import db
-        
+        # Try to list collections to validate connectivity
+        collections = []
         if db is not None:
-            response["database"] = "✅ Available"
-            response["database_url"] = "✅ Configured"
-            response["database_name"] = db.name if hasattr(db, 'name') else "✅ Connected"
-            response["connection_status"] = "Connected"
-            
-            # Try to list collections to verify connectivity
-            try:
-                collections = db.list_collection_names()
-                response["collections"] = collections[:10]  # Show first 10 collections
-                response["database"] = "✅ Connected & Working"
-            except Exception as e:
-                response["database"] = f"⚠️  Connected but Error: {str(e)[:50]}"
+            collections = db.list_collection_names()
+            conn_status = "connected"
         else:
-            response["database"] = "⚠️  Available but not initialized"
-            
-    except ImportError:
-        response["database"] = "❌ Database module not found (run enable-database first)"
+            conn_status = "not_configured"
+
+        return {
+            "backend": "fastapi",
+            "database": "mongodb",
+            "database_url": os.getenv("DATABASE_URL", "not set"),
+            "database_name": os.getenv("DATABASE_NAME", "not set"),
+            "connection_status": conn_status,
+            "collections": collections,
+        }
     except Exception as e:
-        response["database"] = f"❌ Error: {str(e)[:50]}"
-    
-    # Check environment variables
-    import os
-    response["database_url"] = "✅ Set" if os.getenv("DATABASE_URL") else "❌ Not Set"
-    response["database_name"] = "✅ Set" if os.getenv("DATABASE_NAME") else "❌ Not Set"
-    
-    return response
+        return {
+            "backend": "fastapi",
+            "database": "mongodb",
+            "connection_status": "error",
+            "error": str(e),
+        }
 
 
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.getenv("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+@app.get("/kpis")
+def get_kpis() -> Dict[str, Any]:
+    """Return example KPI metrics and a simple 30-day timeseries.
+    This is static/demo data suitable for a working dashboard UI.
+    """
+    now = datetime.utcnow()
+    days = [now - timedelta(days=i) for i in range(29, -1, -1)]
+
+    def series(base: float, variance: float) -> List[Dict[str, Any]]:
+        pts = []
+        value = base
+        for d in days:
+            # simple noisy walk
+            value = max(0, value + (variance * 0.5) - (variance))
+            pts.append({"date": d.strftime("%Y-%m-%d"), "value": round(value, 2)})
+        return pts
+
+    data = {
+        "summary": [
+            {"label": "Revenue", "value": 128430, "delta": 8.4, "format": "currency"},
+            {"label": "Active Users", "value": 5421, "delta": 3.1, "format": "number"},
+            {"label": "Conversion", "value": 4.7, "delta": -0.6, "format": "percent"},
+            {"label": "NPS", "value": 62, "delta": 2.0, "format": "number"},
+        ],
+        "timeseries": {
+            "revenue": series(4000, 450),
+            "users": series(120, 12),
+            "conversion": series(5.2, 0.4),
+        },
+        "generated_at": now.isoformat() + "Z",
+    }
+    return data
